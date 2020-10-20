@@ -1,0 +1,535 @@
+---
+title: "People's Marital Status Analysis"
+author: "Haoming Hu, Ziyu Hao, QianWen Shen, SongYuan Luo"
+date: "19/10/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(pROC)
+library(rms)
+library(janitor)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+```
+
+
+```{r Data Loading, echo = FALSE, message=FALSE}
+# Load the data dictionary and the raw data and correct the variable names
+raw_data <- read_csv("AAKwF7du.csv")
+dict <- read_lines("gss_dict-1.txt", skip = 18) # skip is because of preamble content
+# Now we need the labels because these are the actual responses that we need
+labels_raw <- read_file("gss_labels-1.txt")
+```
+
+
+```{r Set up Dictionary, include = FALSE, message=FALSE, error=FALSE}
+#### Set-up the dictionary ####
+# What we want is a variable name and a variable definition
+variable_descriptions <- as_tibble(dict) %>% 
+  filter(value!="}") %>% 
+  mutate(value = str_replace(value, ".+%[0-9].*f[ ]{2,}", "")) %>% 
+  mutate(value = str_remove_all(value, "\"")) %>% 
+  rename(variable_description = value) %>% 
+  bind_cols(tibble(variable_name = colnames(raw_data)[-1]))
+
+# Now we want a variable name and the possible values
+labels_raw_tibble <- as_tibble(str_split(labels_raw, ";")[[1]]) %>% 
+  filter(row_number()!=1) %>% 
+  mutate(value = str_remove(value, "\nlabel define ")) %>% 
+  mutate(value = str_replace(value, "[ ]{2,}", "XXX")) %>% 
+  mutate(splits = str_split(value, "XXX")) %>% 
+  rowwise() %>% 
+  mutate(variable_name = splits[1], cases = splits[2]) %>% 
+  mutate(cases = str_replace_all(cases, "\n [ ]{2,}", "")) %>%
+  select(variable_name, cases) %>% 
+  drop_na()
+
+# Now we have the variable name and the different options e.g. age and 0-9, 10-19, etc.
+labels_raw_tibble <- labels_raw_tibble %>% 
+  mutate(splits = str_split(cases, "[ ]{0,}\"[ ]{0,}"))
+
+# The function sets up the regex (I know, I know, but eh: https://xkcd.com/208/)
+add_cw_text <- function(x, y){
+  if(!is.na(as.numeric(x))){
+    x_new <- paste0(y, "==", x,"~")
+  }
+  else{
+    x_new <- paste0("\"",x,"\",")
+  }
+  return(x_new)
+}
+
+# The function will be in the row, but it'll get the job done
+cw_statements <- labels_raw_tibble %>% 
+  rowwise() %>% 
+  mutate(splits_with_cw_text = list(modify(splits, add_cw_text, y = variable_name))) %>% 
+  mutate(cw_statement = paste(splits_with_cw_text, collapse = "")) %>% 
+  mutate(cw_statement = paste0("case_when(", cw_statement,"TRUE~\"NA\")")) %>% 
+  mutate(cw_statement = str_replace(cw_statement, ",\"\",",",")) %>% 
+  select(variable_name, cw_statement)
+# So for every variable we now have a case_when() statement that will convert 
+# from the number to the actual response.
+
+# Just do some finally cleanup of the regex.
+cw_statements <- 
+  cw_statements %>% 
+  mutate(variable_name = str_remove_all(variable_name, "\\r")) %>% 
+  mutate(cw_statement = str_remove_all(cw_statement, "\\r"))
+
+
+#### Apply that dictionary to the raw data ####
+# Pull out a bunch of variables and then apply the case when statement for the categorical variables
+gss <- raw_data %>% 
+  select(CASEID, 
+         agedc, 
+         achd_1c, 
+         achdmpl, 
+         totchdc, 
+         acu0c,
+         agema1c,
+         achb1c,
+         rsh_131a,
+         arretwk,
+         slm_01, 
+         sex, 
+         brthcan, 
+         brthfcan,
+         brthmcan,
+         brthmacr,
+         brthprvc,
+         yrarri,
+         prv, 
+         region, 
+         luc_rst, 
+         marstat, 
+         amb_01, 
+         vismin, 
+         alndimmg,
+         bpr_16, 
+         bpr_19,
+         ehg3_01b, 
+         odr_10, 
+         livarr12, 
+         dwelc, 
+         hsdsizec,
+         brthpcan,
+         brtpprvc, 
+         visminpr,
+         rsh_125a, 
+         eop_200,
+         uhw_16gr,
+         lmam_01, 
+         acmpryr,
+         srh_110,
+         srh_115,
+         religflg, 
+         rlr_110,
+         lanhome, 
+         lan_01,
+         famincg2, 
+         ttlincg2, 
+         noc1610, 
+         cc_20_1,
+         cc_30_1,
+         ccmoc1c,
+         cor_031,
+         cor_041,
+         cu0rnkc,
+         pr_cl,
+         chh0014c,
+         nochricc,
+         grndpa,
+         gparliv,
+         evermar,
+         ma0_220,
+         nmarevrc,
+         ree_02,
+         rsh_131b,
+         rto_101,
+         rto_110,
+         rto_120,
+         rtw_300,
+         sts_410,
+         csp_105,
+         csp_110a,
+         csp_110b,
+         csp_110c,
+         csp_110d,
+         csp_160,
+         fi_110) %>% 
+  mutate_at(vars(agedc:fi_110), .funs = funs(ifelse(.>=96, NA, .))) %>% 
+  mutate_at(.vars = vars(sex:fi_110),
+            .funs = funs(eval(parse(text = cw_statements %>%
+                                      filter(variable_name==deparse(substitute(.))) %>%
+                                      select(cw_statement) %>%
+                                      pull()))))
+
+# Fix the names
+gss <- gss %>% 
+  clean_names() %>% 
+  rename(age = agedc,
+         age_first_child = achd_1c,
+         age_youngest_child_under_6 = achdmpl,
+         total_children = totchdc,
+         age_start_relationship = acu0c,
+         age_at_first_marriage = agema1c,
+         age_at_first_birth = achb1c,
+         distance_between_houses = rsh_131a,
+         age_youngest_child_returned_work = arretwk,
+         feelings_life = slm_01,
+         sex = sex,
+         place_birth_canada = brthcan,
+         place_birth_father = brthfcan,
+         place_birth_mother = brthmcan,
+         place_birth_macro_region = brthmacr,
+         place_birth_province = brthprvc,
+         year_arrived_canada = yrarri,
+         province = prv,
+         region = region,
+         pop_center = luc_rst,
+         marital_status = marstat,
+         aboriginal = amb_01,
+         vis_minority = vismin,
+         age_immigration = alndimmg,
+         landed_immigrant = bpr_16,
+         citizenship_status = bpr_19,
+         education = ehg3_01b,
+         own_rent = odr_10,
+         living_arrangement = livarr12,
+         hh_type = dwelc,
+         hh_size = hsdsizec,
+         partner_birth_country = brthpcan,
+         partner_birth_province = brtpprvc,
+         partner_vis_minority = visminpr,
+         partner_sex = rsh_125a,
+         partner_education = eop_200,
+         average_hours_worked = uhw_16gr,
+         worked_last_week = lmam_01,
+         partner_main_activity = acmpryr,
+         self_rated_health = srh_110,
+         self_rated_mental_health = srh_115,
+         religion_has_affiliation = religflg,
+         regilion_importance = rlr_110,
+         language_home = lanhome,
+         language_knowledge = lan_01,
+         income_family = famincg2,
+         income_respondent = ttlincg2,
+         occupation = noc1610,
+         childcare_regular = cc_20_1,
+         childcare_type = cc_30_1,
+         childcare_monthly_cost = ccmoc1c,
+         ever_fathered_child = cor_031,
+         ever_given_birth = cor_041,
+         number_of_current_union = cu0rnkc,
+         lives_with_partner = pr_cl,
+         children_in_household = chh0014c,
+         number_total_children_intention = nochricc,
+         has_grandchildren = grndpa,
+         grandparents_still_living = gparliv,
+         ever_married = evermar,
+         current_marriage_is_first = ma0_220,
+         number_marriages = nmarevrc,
+         religion_participation = ree_02,
+         partner_location_residence = rsh_131b,
+         full_part_time_work = rto_101,
+         time_off_work_birth = rto_110,
+         reason_no_time_off_birth = rto_120,
+         returned_same_job = rtw_300,
+         satisfied_time_children = sts_410,
+         provide_or_receive_fin_supp = csp_105,
+         fin_supp_child_supp = csp_110a,
+         fin_supp_child_exp = csp_110b,
+         fin_supp_lump = csp_110c,
+         fin_supp_other = csp_110d,
+         fin_supp_agreement = csp_160,
+         future_children_intention = fi_110) 
+```
+
+# Abstract 
+Nowadays, people are more concerned about their marriage. People care about their marriage and the factors that are associated with an intimate relationship. In this paper, we extract data from the General Social Survey to analyze what will eventually affect a marital status and cause people to divorce. Our study found out that those who have no kids and have less than 25000 yearly income are more likely to divorce, while those who are older and have no children tend to keep their marriages.  
+
+# Introduction
+In this paper, we gathered data about each family from the General Social Survey dataset. There are 20602 observations contained in this GSS dataset, and the variables of interest are ‘province,’ ‘pop_center,’ ‘marital_status,’ ‘education,’ ‘own_rent,’ ‘living_arrangement,’, ‘average_hours_worked,’ ‘self_rated_health,’ ‘self_rated_mental_health,’ ‘income_respondent,’ ‘children_in_household,’ ‘ever_married,’ ‘religion_participation,’ and ‘current marriage is first’. Among all the observations, we only tend to include eligible and valid data. Therefore, we filter all the non-responses and select the groups of people who have been married, and we have 14154 observations left.
+
+We used the generalized linear model to analyze what factors will affect people’s marital status. A variable called ‘divroce_indicator’ was coined to show if someone has divorced, with 1 representing people having divorced and 0 representing they are still in a good relationship. Several plots and tables have been created, and they are appropriately labelled (figure 1 to 6). Among them, plot 6 is cross-validation that shows our model gives good predictions, and our non-responses are appropriately handled. 
+
+Generally speaking, this report focuses on which kinds of people are more likely to divorce. Our findings have shown that whether people have children affects the divorce rate, as people have no children are more likely to divorce. Besides, personal income plays an important role in people's marital status since low-income groups, such as those who have an income lower than 25000, have a better chance to divorce. Besides, younger people are likely to divorce compared to their elder counterparts. However, these conclusions need more to be enforced by more data because the data sampling we covered is not large enough. Therefore, further research and analysis should be done.
+
+```{r Data Clean up, include=FALSE,echo = FALSE, message=FALSE}
+gss <- gss %>% 
+  mutate_at(vars(age:future_children_intention), 
+            .funs = funs(ifelse(.=="Valid skip"|.=="Refusal"|.=="Not stated", "NA", .))) 
+
+gss <- gss %>% 
+  mutate(is_male = ifelse(sex=="Male", 1, 0)) 
+
+gss <- gss %>% 
+  mutate_at(vars(fin_supp_child_supp:fin_supp_other), .funs = funs(case_when(
+    .=="Yes"~1,
+    .=="No"~0,
+    .=="NA"~as.numeric(NA)
+  )))
+
+main_act <- raw_data %>% 
+  mutate(main_activity = case_when(
+    mpl_105a=="Yes"~ "Working at a paid job/business",
+    mpl_105b=="Yes" ~ "Looking for paid work",
+    mpl_105c=="Yes" ~ "Going to school",
+    mpl_105d=="Yes" ~ "Caring for children",
+    mpl_105e=="Yes" ~ "Household work", 
+    mpl_105i=="Yes" ~ "Other", 
+    TRUE~ "NA")) %>% 
+  select(main_activity) %>% 
+  pull()
+
+age_diff <- raw_data %>% 
+  select(marstat, aprcu0c, adfgrma0) %>% 
+  mutate_at(.vars = vars(aprcu0c:adfgrma0),
+            .funs = funs(eval(parse(text = cw_statements %>%
+                                      filter(variable_name==deparse(substitute(.))) %>%
+                                      select(cw_statement) %>%
+                                      pull())))) %>% 
+  mutate(age_diff = ifelse(marstat=="Living common-law", aprcu0c, adfgrma0)) %>% 
+  mutate_at(vars(age_diff), .funs = funs(ifelse(.=="Valid skip"|.=="Refusal"|.=="Not stated", "NA", .))) %>% 
+  select(age_diff) %>% 
+  pull()
+
+gss <- gss %>% mutate(main_activity = main_act, age_diff = age_diff)
+
+# Change some from strings into numbers
+gss <- gss %>% 
+  rowwise() %>% 
+  mutate(hh_size = str_remove(string = hh_size, pattern = "\\ .*")) %>% 
+  mutate(hh_size = case_when(
+    hh_size=="One" ~ 1,
+    hh_size=="Two" ~ 2,
+    hh_size=="Three" ~ 3,
+    hh_size=="Four" ~ 4,
+    hh_size=="Five" ~ 5,
+    hh_size=="Six" ~ 6
+  )) 
+
+gss <- gss %>% 
+  rowwise() %>% 
+  mutate(number_marriages = str_remove(string = number_marriages, pattern = "\\ .*")) %>% 
+  mutate(number_marriages = case_when(
+    number_marriages=="No" ~ 0,
+    number_marriages=="One" ~ 1,
+    number_marriages=="Two" ~ 2,
+    number_marriages=="Three" ~ 3,
+    number_marriages=="Four" ~ 4
+  )) 
+
+gss <- gss %>% 
+  rowwise() %>% 
+  mutate(number_total_children_known = ifelse(number_total_children_intention=="Don't know"|number_total_children_intention=="NA", 0, 1)) %>% 
+  mutate(number_total_children_intention = str_remove(string = number_total_children_intention, pattern = "\\ .*")) %>% 
+  mutate(number_total_children_intention = case_when(
+    number_total_children_intention=="None" ~ 0,
+    number_total_children_intention=="One" ~ 1,
+    number_total_children_intention=="Two" ~ 2,
+    number_total_children_intention=="Three" ~ 3,
+    number_total_children_intention=="Four" ~ 4,
+    number_total_children_intention=="Don't" ~ as.numeric(NA)
+  )) 
+
+write_csv(gss, "gss.csv")
+
+
+# We have removed variables with too many missing values, and selected variables that are of our interests
+divorce_data <- gss %>% select(age, sex, marital_status, feelings_life, province, pop_center,
+                               education, own_rent, living_arrangement, average_hours_worked, self_rated_health,
+                               self_rated_mental_health, income_respondent, children_in_household, 
+                               ever_married, number_marriages, religion_participation, current_marriage_is_first)
+
+# Remove all the NA and Don't know values
+divorce_data[divorce_data=="NA"]<-"Other"
+divorce_data[divorce_data=="Don't know"]<-"Other"
+
+# Response Data for this study's purpose, are categorized into 2 cases, divorced/not divorced 
+divorce_data <- divorce_data %>% 
+  mutate(divorce_indicator = case_when(
+    marital_status=="Divorced" ~ 1,
+    marital_status=="Separated" ~ 1,
+    marital_status=="Married" ~ 0,
+    marital_status=="Living common-law" ~ 0,
+    marital_status=="Widowed" ~ 0
+  )) 
+
+divorce_data <- divorce_data %>% filter(!ever_married == 'No')
+
+divorce_data <- divorce_data[complete.cases(divorce_data),]
+head(divorce_data, 10)
+```
+
+# Data
+
+We adopt a stratified simple random sample without replacement to make the survey a more accurate representation of the population based on each stratum. Also, it will be more sufficient. There are 27 strata in total. We are targeting those people who are 15 years of age and older in Canada, except people who live in Yukon, Northwest Territories, and Nunavut or people who live in institutions. There are 20,602 respondents chosen to take the survey. To reach those respondents, we get The Address Register and lists of telephone numbers in use from various sources, and we use the telephone to interview those respondents.
+The sampling method is positive. Since it will reduce the cost and provide greater precision.
+In the questionnaire, we changed some questions compare to the previous survey. Some questions are deleted. For example, the income question is no longer on the survey, and we can obtain income information from the tax questions. Overall the questionnaire is highly related to our topic.
+
+The data in use is from the General Social Survey (GSS) 2017. In this study, we aim to find out factors that influence one’s marital status, more specifically, if these factors indicate whether people have divorced or not. Therefore, we created our own data set, which only contains data relating to one marital status. We include 16 predictor variables (These are values used to predict another value. In our case, we use these data to predict if people has divorced or not): ‘province,’ ‘pop_center,’ ‘marital_status,’ ‘education,’ ‘own_rent,’ ‘living_arrangement,’ ‘average_hours_worked,’ ‘self_rated_health,’ ‘self_rated_mental_health,’ ‘income_respondent,’ ‘children_in_household,’ ‘ever_married,’ ‘number_marriages,’ ‘religion_participation,’’ children in the household’ and ‘current marriage is first’.
+
+Among these predictor variables, we filter out all non-responses and exclude people who are not married.As for our response variable (It depends on the other 14 variables mentioned above ) marital status, it is divided into two groups. We denote ‘Divorced’ and ‘Separated’ as 1, denote ‘Married,’ ‘Living common-law’, and ‘Widowed’ as 0. In this paper, we use the mentioned 14 variables to figure out if someone has divorced, on a scalar of 0 to 1, as 1 means he/she is divorced while 0 means he/she is not.
+
+We also exclude some general data, such as age groups and gender, because they are generally normally distributed, by which I mean they will not affect our data of interest. 
+
+```{r,echo = FALSE}
+ggplot(gss, aes(marital_status, fill = sex)) +
+  geom_bar(position = "dodge",color="black")+
+  labs(
+    x = 'Gender',
+    y = NULL,
+    title = "Figure1: Marrial Status of respondents by Gender in gss 2017")
+```
+By the above graph, the number of the marital status of each gender is almost equivalent except for the widowed. Thus we could ignore gender's effect
+
+```{r,echo = FALSE}
+ggplot(gss, aes(education)) +
+   geom_bar()+scale_x_discrete(guide = guide_axis(n.dodge=3))+
+  labs(
+    x = 'Education',
+    y = NULL,
+    title = ("Figure2: Education of respondents in gss 2017"))
+```
+
+As the above graph is shown, there is some missing value which will affect our research negatively. Thus we need to filter out those missing values to make our results more accurate.
+
+```{r,echo=FALSE}
+ggplot(gss, aes(x=factor(income_respondent,level=c("Less than $25,000","$25,000 to $49,999",
+                                         "$50,000 to $74,999", "$75,000 to $99,999",
+                                         "$100,000 to $ 124,999", "$125,000 and more")))) +
+   geom_bar()+
+  labs(
+    x = 'gender',
+    y = NULL,
+    title = ("Figure3: Income of respondents in gss 2017"))
+```
+
+Most respondents'  income is lower than $50,000.This would give us an interesting point related to their feelings of life.
+
+In general, the data set is good. Since it contains a large amount number of variables so that we could find factors that will affect people’s marital status. However, there are many miss data in the data set. Also, the data is only collected from ten provinces, so the dataset could be biased.
+
+
+
+# Model
+
+The model we used in this research is generalized linear model(GLM). And for the purpose of this data, we have categorized our response outcome into 2 categories, divorced or not divorced, where:
+
+  - 1 represents the number of people that are either divorced or separated
+  - 0 represents the number of people that are married, living common-law or widowed.
+
+Predictors are mostly categorical, with a few exceptions, age, feelings_life, and number of marriages which are numeric variables.
+To be more specific. The response outcome in the dataset is divorce status, and the predictors include age, sex, income, feelings of life, education, whether the respondent owns rent, living arrangement, average hours worked per week, self rated health and mental health, number of children in the household, religion participation, whether current marriage is the first. 
+
+Our model equation is : 
+
+$$Pr(divorced = 1) = \mbox{logit}^{-1}\left(\alpha^{age}_{a[i]} + \alpha^{educ}_{e[i]} + \alpha^{income}_{s[i]} + \alpha^{lifesatisfy}_{d[i]} + \alpha^{rent}_{e[i]} + \alpha^{living}_{s[i]} + \alpha^{workhour}_{d[i]} + \alpha^{health}_{e[i]} + \alpha^{mentalhealth}_{s[i]} + \alpha^{children}_{e[i]} + \alpha^{religion}_{s[i]}+ \alpha^{first marriage}_{s[i]}\right) $$
+
+After using the Logistic regression in R to investigate the relationship between martial status and the predictors above that are possibly linked with marriage. 
+Age, sex, two categories of education, six categories of living arrangement, 3 categories of respondent's income, 5 categories of number of children in the household, and whether current marriage is the first are the significant predictors according to their p-values. 
+
+ 
+```{r, Model, echo = FALSE, message=FALSE, include=FALSE}
+# The model we chose included age, sex, .... which are reasonable co-variates that are possibly linked with marriage
+gf <- glm(divorce_data$divorce_indicator ~ age + sex + feelings_life  + education
+          + own_rent + living_arrangement + average_hours_worked + self_rated_health + self_rated_mental_health
+          + income_respondent + children_in_household + religion_participation + current_marriage_is_first,  family = 'binomial', data = divorce_data)
+summary(gf)
+```
+
+
+# Discussion and Results
+
+```{r, Data Analysis, echo=FALSE, message=FALSE}
+# Figure 4, A histogram to check the normality assumption
+hist(divorce_data$divorce_indicator, main = "Figure4: Number of divorced people or not divorced people") 
+```
+
+Figure 1 histogram shows that our data is significantly unbalanced, it does not follow normal distribution. Therefore, a logistic model with binomial family would be more appropriate for this data. 
+
+
+
+```{r ROC, echo=FALSE, message= FALSE}
+divorce_data$pred.prob <- predict(gf, type = "response")
+roc_logit <- roc(divorce_data$divorce_indicator ~ divorce_data$pred.prob)
+TPR <- roc_logit$sensitivities
+FPR <- 1 - roc_logit$specificities
+plot(FPR, TPR, xlim = c(0,1), ylim = c(0,1), type = 'l', lty = 1, lwd = 2, col = 'red' )
+abline(a = 0, b = 1, lty = 2, col = 'blue')
+text(0.5, 0.3, label = paste("AUC = ", round(auc(roc_logit), 2)))
+title("Figure 5: ROC curve")
+```
+
+From Figure 2, the area under the curve indicates that the model predicts accurately about 96% of the time.
+
+Cross validation method is implemented to ensure our model fits the data well. See figure 3.
+
+```{r Cross Validation, echo=FALSE, message= FALSE}
+lrm.final <- lrm(divorce_data$divorce_indicator ~ age + sex + feelings_life  + education
+                 + own_rent + living_arrangement + average_hours_worked + self_rated_health + self_rated_mental_health
+                 + income_respondent + children_in_household + religion_participation + current_marriage_is_first, data = divorce_data,
+                 x =TRUE, y = TRUE, model= T)
+cross.calib <- calibrate(lrm.final, method="crossvalidation", B=10)
+plot(cross.calib, las=1, xlab = "Predicted Probability")
+title("Figure 5: Cross Validation")
+```
+
+As we can see from figure 3, the data are mostly consistent on the ideal line. 
+
+
+## Weakness
+An obvious drawback regarding the method of survey is that telephone interview limits coverage in certain areas, in our case, three territories namely Northwest territory, Yukon and Nunavut are excluded. Besides that, phone interviews have greatly limited not only the length but the complexity of survey questions due to respondents’ lack of willingness to be involved in long telephone surveys. Lastly, an absence of visual or nonverbal cue due to phone interviews can deter disclosure of sensitive information such as “how many times have you been married?”.  
+
+The method we used in coping with missing data in the variables we are interested in investigating is deletion. However, this can lead to biased estimates and therefore affecting the conclusions we might draw from the results. In categorizing the data, we included the choice “widowed” into 0, namely the non-divorced group, which affects the accuracy of our model in predicting factors affecting marriage. 
+
+The sampling method we used is Stratified sampling and the groups are 10 provinces. Instead of the generalized linear model, svyglm might be a better choice since it computes the standard errors with the consideration of the loss of precision due to sampling weights. In glm, the weight given to the errors are adjusted in the least square estimation with standard errors not being corrected.
+
+## Results
+
+Among these predictors, age, and living arrangement with spouse are the most significant variables. From the model summary, it seems like age has a negative correlation with divorce status, which indicates that elder respondents are less likely to be divorced, however, note that this includes the widowed respondents. Also, respondent's living arrangement with no spouse had a positive correlation with divorce status, where respondent's living with spouses had a negative correlation. This indicates that Children is also an important factor that are associated with marital status, respondents with children are less likely to be divorced. Similar conclusion can be seen from the predictor number of children. 
+
+# Appendices
+1. You can find our codes in:
+(https://github.com/songyuan-l/People-s-Marital-Status-Analysis)
+
+# References
+
+1.R Core Team (2020). R: A language and environment for statistical computing. R
+  Foundation for Statistical Computing, Vienna, Austria. URL
+  https://www.R-project.org/.
+  
+2.Xavier Robin, Natacha Turck, Alexandre Hainard, Natalia Tiberti, Frédérique
+  Lisacek, Jean-Charles Sanchez and Markus Müller (2011). pROC: an open-source
+  package for R and S+ to analyze and compare ROC curves. BMC Bioinformatics, 12, p.
+  77.  DOI: 10.1186/1471-2105-12-77 <http://www.biomedcentral.com/1471-2105/12/77/>
+  
+3.Frank E Harrell Jr (2019). rms: Regression Modeling Strategies. R package version
+  5.1-4. https://CRAN.R-project.org/package=rms
+  
+4.Sam Firke (2020). janitor: Simple Tools for Examining and Cleaning Dirty Data. R
+  package version 2.0.1. https://CRAN.R-project.org/package=janitor
+  
+5.Wickham et al., (2019). Welcome to the tidyverse. Journal of Open Source Software,
+  4(43), 1686, https://doi.org/10.21105/joss.01686
+
+6.Hadley Wickham, Romain François, Lionel Henry and Kirill Müller (2020). dplyr: A
+  Grammar of Data Manipulation. R package version 0.8.5.
+  https://CRAN.R-project.org/package=dplyr
+
+7.H. Wickham. ggplot2: Elegant Graphics for Data Analysis. Springer-Verlag New York,
+  2016.
+
+8.dataset:
+  https://sda-artsci-utoronto-ca.myaccess.library.utoronto.ca/cgi-bin/sda/hsda?harcsda4+gss31
+
+9.data cleaning:
+  Authors: Rohan Alexander and Sam Caetano
+  Contact: rohan.alexander@utoronto.ca
+  Date: 7 October 2020
+  License: MIT
